@@ -1,22 +1,22 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Nainstaluje naplanovanu ulohu pro automatickou aktualizaci RDP Wrapper
+    Installs a scheduled task for automatic RDP Wrapper updates
 
 .DESCRIPTION
-    Vytvori naplanovanu ulohu, ktera se spusti pri startu systemu
+    Creates a scheduled task that runs at system startup
 
 .PARAMETER Uninstall
-    Odstrani naplanovanu ulohu
+    Removes the scheduled task
 
 .PARAMETER AutoRestart
-    Pokud je zadano, naplanovan uloha bude automaticky restartovat PC po aktualizaci
+    If specified, the scheduled task will automatically restart PC after update
 
 .PARAMETER UserName
-    Jmeno uzivatele pod kterym ma uloha bezet
+    Username under which the task will run
 
 .PARAMETER Password
-    Heslo uzivatele (pokud neni zadano, bude vyzadano)
+    User password (if not provided, will be requested)
 
 .EXAMPLE
     .\Install-ScheduledTask.ps1 -AutoRestart -UserName "Administrator"
@@ -33,87 +33,87 @@ param(
 
 $TaskName = "RDP Wrapper Auto Update"
 
-# Pevna cesta k instalacnimu adresari
+# Fixed path to installation directory
 $InstallDir = "C:\Program Files\RDP Wrapper\AutoUpdate"
 $UpdateScript = Join-Path $InstallDir "Update-RDPWrap.ps1"
 
 if ($Uninstall) {
-    Write-Host "Odstranuji naplanovanu ulohu '$TaskName'..." -ForegroundColor Yellow
+    Write-Host "Removing scheduled task '$TaskName'..." -ForegroundColor Yellow
     schtasks /Delete /TN "$TaskName" /F 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "Naplanovan uloha odstranena" -ForegroundColor Green
+        Write-Host "Scheduled task removed" -ForegroundColor Green
     } else {
-        Write-Host "Naplanovan uloha neexistuje nebo se nepodarilo odstranit" -ForegroundColor Yellow
+        Write-Host "Scheduled task does not exist or could not be removed" -ForegroundColor Yellow
     }
     exit 0
 }
 
-# Kontrola existence Update skriptu
+# Check if Update script exists
 if (-not (Test-Path $UpdateScript)) {
-    Write-Host "CHYBA: Update-RDPWrap.ps1 nenalezen v: $UpdateScript" -ForegroundColor Red
+    Write-Host "ERROR: Update-RDPWrap.ps1 not found at: $UpdateScript" -ForegroundColor Red
     exit 1
 }
 
-# Odstranit existujici ulohu pokud existuje
+# Remove existing task if exists
 schtasks /Delete /TN "$TaskName" /F 2>$null
 
-# Pripravit prikaz pro PowerShell (cela cesta v uvozovkach)
+# Prepare PowerShell command (full path in quotes)
 $Command = if ($AutoRestart) {
     "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \`"$UpdateScript\`" -AutoRestart"
 } else {
     "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \`"$UpdateScript\`""
 }
 
-# Urcit uzivatele
+# Determine user
 if (-not $UserName) {
     $UserName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
-# Zeptat se na heslo pokud nebylo zadano
+# Request password if not provided
 if (-not $Password) {
     Write-Host ""
-    Write-Host "Pro spusteni ulohy pri startu systemu je potreba heslo uzivatele." -ForegroundColor Yellow
-    Write-Host "Uzivatel: $UserName" -ForegroundColor Cyan
+    Write-Host "User password is required to run the task at system startup." -ForegroundColor Yellow
+    Write-Host "User: $UserName" -ForegroundColor Cyan
     Write-Host ""
-    $SecurePassword = Read-Host -Prompt "Zadej heslo" -AsSecureString
+    $SecurePassword = Read-Host -Prompt "Enter password" -AsSecureString
     $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
     $Password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 }
 
-# Vytvorit ulohu pomoci schtasks
+# Create task using schtasks
 Write-Host ""
-Write-Host "Vytvarim naplanovanu ulohu..." -ForegroundColor Yellow
+Write-Host "Creating scheduled task..." -ForegroundColor Yellow
 
 $Result = schtasks /Create /TN "$TaskName" /TR $Command /SC ONSTART /RU "$UserName" /RP "$Password" /RL HIGHEST /F 2>&1
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
     Write-Host "===========================================" -ForegroundColor Green
-    Write-Host "Naplanovan uloha uspesne vytvorena!" -ForegroundColor Green
+    Write-Host "Scheduled task created successfully!" -ForegroundColor Green
     Write-Host "===========================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Nazev: $TaskName"
-    Write-Host "Spousti se: Pri startu systemu"
-    Write-Host "Uzivatel: $UserName"
-    Write-Host "Skript: $UpdateScript"
+    Write-Host "Name: $TaskName"
+    Write-Host "Trigger: At system startup"
+    Write-Host "User: $UserName"
+    Write-Host "Script: $UpdateScript"
 
     if ($AutoRestart) {
         Write-Host ""
-        Write-Host "POZOR: AutoRestart je AKTIVNI!" -ForegroundColor Yellow
-        Write-Host "Po nalezeni novych offsetu se PC automaticky restartuje." -ForegroundColor Yellow
+        Write-Host "WARNING: AutoRestart is ENABLED!" -ForegroundColor Yellow
+        Write-Host "PC will automatically restart after finding new offsets." -ForegroundColor Yellow
     }
     else {
         Write-Host ""
-        Write-Host "AutoRestart je vypnuty." -ForegroundColor Cyan
-        Write-Host "Nove offsety budou pridany, ale PC se nerestartuje automaticky."
+        Write-Host "AutoRestart is disabled." -ForegroundColor Cyan
+        Write-Host "New offsets will be added, but PC will not restart automatically."
     }
 
     Write-Host ""
-    Write-Host "Pro odinstalaci spustte: .\Install-ScheduledTask.ps1 -Uninstall" -ForegroundColor Gray
+    Write-Host "To uninstall run: .\Install-ScheduledTask.ps1 -Uninstall" -ForegroundColor Gray
 }
 else {
-    Write-Host "CHYBA pri vytvareni napl novane ulohy:" -ForegroundColor Red
+    Write-Host "ERROR creating scheduled task:" -ForegroundColor Red
     Write-Host $Result -ForegroundColor Red
     exit 1
 }

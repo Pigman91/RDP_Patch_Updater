@@ -1,17 +1,17 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Automaticky aktualizuje rdpwrap.ini s novymi offsety pro aktualni verzi termsrv.dll
+    Automatically updates rdpwrap.ini with new offsets for current termsrv.dll version
 
 .DESCRIPTION
-    Skript spusti RDPWrapOffsetFinder.exe, ziska nove offsety a pokud jeste nejsou
-    v rdpwrap.ini, prida je. Volitelne restartuje pocitac.
+    Script runs RDPWrapOffsetFinder.exe, gets new offsets and if they are not yet
+    in rdpwrap.ini, adds them. Optionally restarts the computer.
 
 .PARAMETER AutoRestart
-    Pokud je zadano, po uspesne aktualizaci restartuje pocitac
+    If specified, restarts the computer after successful update
 
 .PARAMETER Force
-    Prida offsety i kdyz uz existuji (prepise)
+    Adds offsets even if they already exist (overwrites)
 
 .EXAMPLE
     .\Update-RDPWrap.ps1
@@ -23,9 +23,9 @@ param(
     [switch]$Force
 )
 
-# Konfigurace
+# Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-# Fallback na pevnou cestu pokud se $ScriptDir nevyhodnoti spravne
+# Fallback to fixed path if $ScriptDir doesn't evaluate correctly
 if ([string]::IsNullOrEmpty($ScriptDir) -or -not (Test-Path $ScriptDir)) {
     $ScriptDir = "C:\Program Files\RDP Wrapper\AutoUpdate"
 }
@@ -34,7 +34,7 @@ $TermsrvPath = "C:\Windows\System32\termsrv.dll"
 $RdpWrapIniPath = "C:\Program Files\RDP Wrapper\rdpwrap.ini"
 $LogFile = Join-Path $ScriptDir "Update-RDPWrap.log"
 
-# Funkce pro logovani
+# Logging function
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -49,39 +49,39 @@ function Write-Log {
     }
 }
 
-# Kontrola predpokladu
+# Check prerequisites
 function Test-Prerequisites {
-    Write-Log "Kontroluji predpoklady..."
+    Write-Log "Checking prerequisites..."
 
     if (-not (Test-Path $OffsetFinderPath)) {
-        Write-Log "RDPWrapOffsetFinder.exe nenalezen: $OffsetFinderPath" "ERROR"
+        Write-Log "RDPWrapOffsetFinder.exe not found: $OffsetFinderPath" "ERROR"
         return $false
     }
 
     if (-not (Test-Path $TermsrvPath)) {
-        Write-Log "termsrv.dll nenalezen: $TermsrvPath" "ERROR"
+        Write-Log "termsrv.dll not found: $TermsrvPath" "ERROR"
         return $false
     }
 
     if (-not (Test-Path $RdpWrapIniPath)) {
-        Write-Log "rdpwrap.ini nenalezen: $RdpWrapIniPath" "ERROR"
+        Write-Log "rdpwrap.ini not found: $RdpWrapIniPath" "ERROR"
         return $false
     }
 
-    Write-Log "Vsechny predpoklady splneny"
+    Write-Log "All prerequisites met"
     return $true
 }
 
-# Ziskani novych offsetu
+# Get new offsets
 function Get-NewOffsets {
-    Write-Log "Spoustim RDPWrapOffsetFinder.exe..."
+    Write-Log "Running RDPWrapOffsetFinder.exe..."
 
     $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
     $TempOutputFile = Join-Path $ScriptDir "offsetfinder_output.tmp"
 
     try {
-        # Pouzit Start-Process s presmerovanim do souboru - spolehlivejsi nez & operator
-        Write-Log "Zkousim verzi se symboly..."
+        # Use Start-Process with redirection to file - more reliable than & operator
+        Write-Log "Trying version with symbols..."
         $ExePath = Join-Path $OffsetFinderDir "RDPWrapOffsetFinder.exe"
 
         $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -103,9 +103,9 @@ function Get-NewOffsets {
 
         $ExitCode = $Process.ExitCode
 
-        # Pokud je chyba ve vystupu, zkusit nosymbol verzi
+        # If there's an error in output, try nosymbol version
         if ($OutputText -match "ERROR:" -or $ErrorText -match "ERROR:" -or [string]::IsNullOrWhiteSpace($OutputText)) {
-            Write-Log "Verze se symboly selhala (nebo prazdny vystup), zkousim nosymbol verzi..." "WARN"
+            Write-Log "Symbol version failed (or empty output), trying nosymbol version..." "WARN"
 
             $NoSymbolPath = Join-Path $OffsetFinderDir "RDPWrapOffsetFinder_nosymbol.exe"
             if (Test-Path $NoSymbolPath) {
@@ -124,43 +124,43 @@ function Get-NewOffsets {
         }
 
         if ($ExitCode -ne 0) {
-            Write-Log "RDPWrapOffsetFinder selhal s kodem: $ExitCode" "ERROR"
+            Write-Log "RDPWrapOffsetFinder failed with code: $ExitCode" "ERROR"
             return $null
         }
 
-        # Finalni kontrola na ERROR
+        # Final check for ERROR
         if ($OutputText -match "ERROR:") {
-            Write-Log "OffsetFinder nedokazal najit vsechny offsety" "ERROR"
-            Write-Log "Vystup: $OutputText" "ERROR"
+            Write-Log "OffsetFinder could not find all offsets" "ERROR"
+            Write-Log "Output: $OutputText" "ERROR"
             return $null
         }
 
         if ([string]::IsNullOrWhiteSpace($OutputText)) {
-            Write-Log "OffsetFinder vratil prazdny vystup" "ERROR"
+            Write-Log "OffsetFinder returned empty output" "ERROR"
             return $null
         }
 
-        Write-Log "Vystup ziskan uspesne"
+        Write-Log "Output retrieved successfully"
         return $OutputText
     }
     catch {
-        Write-Log "Chyba pri spousteni RDPWrapOffsetFinder: $_" "ERROR"
+        Write-Log "Error running RDPWrapOffsetFinder: $_" "ERROR"
         return $null
     }
 }
 
-# Extrakce verze z vystupu
+# Extract version from output
 function Get-VersionFromOutput {
     param([string]$Output)
 
-    # Hledame vzor [10.0.xxxxx.xxxx]
+    # Looking for pattern [10.0.xxxxx.xxxx]
     if ($Output -match '\[(\d+\.\d+\.\d+\.\d+)\]') {
         return $Matches[1]
     }
     return $null
 }
 
-# Kontrola zda verze existuje v INI
+# Check if version exists in INI
 function Test-VersionExists {
     param([string]$Version, [string]$IniContent)
 
@@ -168,7 +168,7 @@ function Test-VersionExists {
     return $IniContent -match $Pattern
 }
 
-# Vytvoreni zalohy
+# Create backup
 function Backup-IniFile {
     $BackupDir = Join-Path $ScriptDir "Backups"
     if (-not (Test-Path $BackupDir)) {
@@ -179,102 +179,102 @@ function Backup-IniFile {
     $BackupPath = Join-Path $BackupDir "rdpwrap_$Timestamp.ini"
 
     Copy-Item -Path $RdpWrapIniPath -Destination $BackupPath -Force
-    Write-Log "Zaloha vytvorena: $BackupPath"
+    Write-Log "Backup created: $BackupPath"
 
     return $BackupPath
 }
 
-# Pridani novych offsetu do INI
+# Add new offsets to INI
 function Add-OffsetsToIni {
     param([string]$NewOffsets, [string]$BackupPath)
 
-    # Pouzijeme zalohu jako zdroj (ta uz existuje a neni zamcena)
+    # Use backup as source (it already exists and is not locked)
     $CurrentContent = Get-Content -Path $BackupPath -Raw -Encoding UTF8
 
-    # Odstranit pripadne prazdne radky na konci a pridat nove offsety
+    # Remove any trailing empty lines and add new offsets
     $CurrentContent = $CurrentContent.TrimEnd()
     $NewContent = $CurrentContent + "`r`n`r`n" + $NewOffsets.Trim() + "`r`n"
 
-    # Vytvorit docasny soubor s novym obsahem
+    # Create temporary file with new content
     $TempFile = Join-Path $ScriptDir "rdpwrap_new.ini"
     Set-Content -Path $TempFile -Value $NewContent -Encoding UTF8 -NoNewline
-    Write-Log "Docasny soubor vytvoren: $TempFile"
+    Write-Log "Temporary file created: $TempFile"
 
-    # Prekopirovat docasny soubor pres puvodni (toto funguje i kdyz je soubor pouzivan)
+    # Copy temporary file over original (this works even when file is in use)
     Copy-Item -Path $TempFile -Destination $RdpWrapIniPath -Force
-    Write-Log "Nove offsety pridany do rdpwrap.ini" "SUCCESS"
+    Write-Log "New offsets added to rdpwrap.ini" "SUCCESS"
 
-    # Smazat docasny soubor
+    # Delete temporary file
     Remove-Item -Path $TempFile -Force
 }
 
-# Hlavni logika
+# Main logic
 function Main {
-    Write-Log "========== Spoustim Update-RDPWrap =========="
+    Write-Log "========== Starting Update-RDPWrap =========="
 
-    # Kontrola predpokladu
+    # Check prerequisites
     if (-not (Test-Prerequisites)) {
         return 1
     }
 
-    # Ziskat nove offsety
+    # Get new offsets
     $NewOffsets = Get-NewOffsets
     if (-not $NewOffsets) {
-        Write-Log "Nepodarilo se ziskat nove offsety" "ERROR"
+        Write-Log "Failed to get new offsets" "ERROR"
         return 1
     }
 
-    # Extrahovat verzi
+    # Extract version
     $Version = Get-VersionFromOutput -Output $NewOffsets
     if (-not $Version) {
-        Write-Log "Nepodarilo se extrahovat verzi z vystupu" "ERROR"
-        Write-Log "Vystup: $NewOffsets" "ERROR"
+        Write-Log "Failed to extract version from output" "ERROR"
+        Write-Log "Output: $NewOffsets" "ERROR"
         return 1
     }
 
-    Write-Log "Nalezena verze: $Version"
+    Write-Log "Found version: $Version"
 
-    # Nacist aktualni INI a zkontrolovat zda verze existuje
+    # Load current INI and check if version exists
     $CurrentIni = Get-Content -Path $RdpWrapIniPath -Raw -Encoding UTF8
 
     if ((Test-VersionExists -Version $Version -IniContent $CurrentIni) -and -not $Force) {
-        Write-Log "Verze $Version uz existuje v rdpwrap.ini - zadna akce potreba" "SUCCESS"
+        Write-Log "Version $Version already exists in rdpwrap.ini - no action needed" "SUCCESS"
         return 0
     }
 
     if ($Force -and (Test-VersionExists -Version $Version -IniContent $CurrentIni)) {
-        Write-Log "Verze $Version uz existuje, ale Force je aktivni - pokracuji" "WARN"
+        Write-Log "Version $Version already exists, but Force is active - continuing" "WARN"
     }
 
-    # Vytvorit zalohu
+    # Create backup
     $BackupPath = Backup-IniFile
 
-    # Pridat nove offsety
+    # Add new offsets
     try {
         Add-OffsetsToIni -NewOffsets $NewOffsets -BackupPath $BackupPath
     }
     catch {
-        Write-Log "Chyba pri zapisu do rdpwrap.ini: $_" "ERROR"
-        Write-Log "Obnovuji ze zalohy..." "WARN"
+        Write-Log "Error writing to rdpwrap.ini: $_" "ERROR"
+        Write-Log "Restoring from backup..." "WARN"
         Copy-Item -Path $BackupPath -Destination $RdpWrapIniPath -Force
         return 1
     }
 
-    Write-Log "Aktualizace dokoncena uspesne" "SUCCESS"
+    Write-Log "Update completed successfully" "SUCCESS"
 
-    # Restart pokud je pozadovan
+    # Restart if requested
     if ($AutoRestart) {
-        Write-Log "AutoRestart je aktivni - restartuji pocitac za 30 sekund..." "WARN"
-        Write-Log "Pro zruseni spustte: shutdown /a"
-        shutdown /r /t 30 /c "RDP Wrapper aktualizovan - restart systemu"
+        Write-Log "AutoRestart is active - restarting computer in 30 seconds..." "WARN"
+        Write-Log "To cancel run: shutdown /a"
+        shutdown /r /t 30 /c "RDP Wrapper updated - system restart"
     }
     else {
-        Write-Log "Pro aktivaci novych offsetu je potreba restartovat pocitac" "WARN"
+        Write-Log "Computer restart is required to activate new offsets" "WARN"
     }
 
     return 0
 }
 
-# Spustit
+# Run
 $ExitCode = Main
 exit $ExitCode
