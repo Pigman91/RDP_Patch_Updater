@@ -1,1 +1,0 @@
-.\RDPWrapOffsetFinder.exe C:\Windows\System32\termsrv.dll
