@@ -2,6 +2,8 @@
 
 Automatic offset updater for RDP Wrapper that keeps your `rdpwrap.ini` always up-to-date after Windows updates.
 
+https://www.paypal.com/donate/?hosted_button_id=J8DWRTBTMZKVE
+
 ## Problem
 
 After every Windows update, the `termsrv.dll` file changes and RDP Wrapper stops working because the offsets in `rdpwrap.ini` no longer match. You have to manually find new offsets or wait for someone to update the INI file.
