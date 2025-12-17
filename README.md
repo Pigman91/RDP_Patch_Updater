@@ -2,7 +2,13 @@
 
 Automatic offset updater for RDP Wrapper that keeps your `rdpwrap.ini` always up-to-date after Windows updates.
 
-[![PayPal Donate](https://img.shields.io/badge/PayPal-Donate-blue.svg?logo=paypal)](https://www.paypal.com/donate/?hosted_button_id=J8DWRTBTMZKVE)
+## Support This Project
+
+If this tool helped you, you can support its development with a donation:
+
+<a href="https://www.paypal.com/donate/?hosted_button_id=J8DWRTBTMZKVE">
+  <img src="https://raw.githubusercontent.com/stefan-niedermann/paypal-donate-button/master/paypal-donate-button.png" alt="Donate with PayPal" width="300" />
+</a>
 
 ## Problem
 
@@ -123,12 +129,6 @@ C:\Program Files\RDP Wrapper\AutoUpdate\Update-RDPWrap.log
 - **"RDPWrapOffsetFinder.exe not found"** - Reinstall using the installer
 - **"rdpwrap.ini not found"** - RDP Wrapper is not installed, use Complete installer
 - **"OffsetFinder could not find all offsets"** - Your Windows version might not be supported yet
-
-## Support
-
-If you find this tool useful, consider buying me a coffee:
-
-[![PayPal Donate](https://img.shields.io/badge/PayPal-Donate-blue.svg?logo=paypal)](https://www.paypal.com/donate/?hosted_button_id=J8DWRTBTMZKVE)
 
 ## Credits
 
