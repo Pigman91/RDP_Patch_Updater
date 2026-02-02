@@ -34,6 +34,10 @@ $TermsrvPath = "C:\Windows\System32\termsrv.dll"
 $RdpWrapIniPath = "C:\Program Files\RDP Wrapper\rdpwrap.ini"
 $LogFile = Join-Path $ScriptDir "Update-RDPWrap.log"
 
+# Retry configuration
+$MaxRetries = 3
+$RetryDelaySeconds = 60
+
 # Logging function
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -72,15 +76,11 @@ function Test-Prerequisites {
     return $true
 }
 
-# Get new offsets
-function Get-NewOffsets {
-    Write-Log "Running RDPWrapOffsetFinder.exe..."
-
+# Run OffsetFinder once (internal function)
+function Invoke-OffsetFinder {
     $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
-    $TempOutputFile = Join-Path $ScriptDir "offsetfinder_output.tmp"
 
     try {
-        # Use Start-Process with redirection to file - more reliable than & operator
         Write-Log "Trying version with symbols..."
         $ExePath = Join-Path $OffsetFinderDir "RDPWrapOffsetFinder.exe"
 
@@ -147,6 +147,31 @@ function Get-NewOffsets {
         Write-Log "Error running RDPWrapOffsetFinder: $_" "ERROR"
         return $null
     }
+}
+
+# Get new offsets with retry logic
+function Get-NewOffsets {
+    Write-Log "Running RDPWrapOffsetFinder.exe..."
+
+    for ($Attempt = 1; $Attempt -le $MaxRetries; $Attempt++) {
+        if ($Attempt -gt 1) {
+            Write-Log "Retry attempt $Attempt of $MaxRetries..."
+        }
+
+        $Result = Invoke-OffsetFinder
+
+        if ($Result) {
+            return $Result
+        }
+
+        if ($Attempt -lt $MaxRetries) {
+            Write-Log "Waiting $RetryDelaySeconds seconds before retry..." "WARN"
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
+    }
+
+    Write-Log "All $MaxRetries attempts failed" "ERROR"
+    return $null
 }
 
 # Extract version from output
