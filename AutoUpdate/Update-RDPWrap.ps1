@@ -219,8 +219,11 @@ function Invoke-OffsetFinder {
 
         # If there's an error in output, try nosymbol version
         if ($OutputText -match "ERROR:" -or $ErrorText -match "ERROR:" -or [string]::IsNullOrWhiteSpace($OutputText)) {
-            Write-Log "Symbol version failed (or empty output), trying nosymbol version..." "WARN"
+            Write-Log "Symbol version failed (exit=$ExitCode)" "WARN"
+            if (-not [string]::IsNullOrWhiteSpace($OutputText)) { Write-Log "Symbol stdout: $($OutputText.Trim())" "WARN" }
+            if (-not [string]::IsNullOrWhiteSpace($ErrorText)) { Write-Log "Symbol stderr: $($ErrorText.Trim())" "WARN" }
 
+            Write-Log "Trying nosymbol version..."
             $NoSymbolPath = Join-Path $OffsetFinderDir "RDPWrapOffsetFinder_nosymbol.exe"
             if (Test-Path $NoSymbolPath) {
                 $ProcessInfo.FileName = $NoSymbolPath
@@ -239,6 +242,8 @@ function Invoke-OffsetFinder {
 
         if ($ExitCode -ne 0) {
             Write-Log "RDPWrapOffsetFinder failed with code: $ExitCode" "ERROR"
+            if (-not [string]::IsNullOrWhiteSpace($OutputText)) { Write-Log "stdout: $($OutputText.Trim())" "ERROR" }
+            if (-not [string]::IsNullOrWhiteSpace($ErrorText)) { Write-Log "stderr: $($ErrorText.Trim())" "ERROR" }
             return $null
         }
 
