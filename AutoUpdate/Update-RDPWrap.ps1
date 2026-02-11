@@ -25,7 +25,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.2.1"
+$ScriptVersion = "2.2.2"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -362,13 +362,21 @@ function Main {
     $LastVersionFile = Join-Path $ScriptDir ".last_script_version"
     $ScriptUpgraded = $false
 
+    $ForceRecheck = $false
     if (Test-Path $LastVersionFile) {
         $LastVersion = (Get-Content $LastVersionFile -Raw).Trim()
         if ($LastVersion -ne $ScriptVersion) {
             Write-Log "Script upgraded ($LastVersion -> $ScriptVersion) - forcing full check"
-            Remove-Item -Path $LastHashFile -Force -ErrorAction SilentlyContinue
-            $ScriptUpgraded = $true
+            $ForceRecheck = $true
         }
+    }
+    else {
+        Write-Log "No version marker found - forcing full check"
+        $ForceRecheck = $true
+    }
+
+    if ($ForceRecheck) {
+        Remove-Item -Path $LastHashFile -Force -ErrorAction SilentlyContinue
     }
     Set-Content -Path $LastVersionFile -Value $ScriptVersion
 
