@@ -130,28 +130,6 @@ function Wait-ForNetwork {
     return $false
 }
 
-# Clear local symbol cache to prevent stale negative-lookup entries
-function Clear-SymbolCache {
-    $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
-    $CachePaths = @(
-        (Join-Path $OffsetFinderDir "sym")
-        (Join-Path $OffsetFinderDir "symbols")
-        (Join-Path $OffsetFinderDir "SymCache")
-    )
-
-    foreach ($CachePath in $CachePaths) {
-        if (Test-Path $CachePath) {
-            try {
-                Remove-Item -Path $CachePath -Recurse -Force
-                Write-Log "Cleared symbol cache: $CachePath"
-            }
-            catch {
-                Write-Log "Could not clear symbol cache ${CachePath}: $_" "WARN"
-            }
-        }
-    }
-}
-
 # Self-update: check GitHub for newer script version
 function Update-Self {
     Write-Log "Checking for script updates..."
@@ -190,6 +168,9 @@ function Update-Self {
     }
 }
 
+# Store partial output from last OffsetFinder run (for version extraction on failure)
+$script:LastOffsetFinderOutput = ""
+
 # Run OffsetFinder once (internal function)
 function Invoke-OffsetFinder {
     $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
@@ -216,6 +197,11 @@ function Invoke-OffsetFinder {
         $Process.WaitForExit()
 
         $ExitCode = $Process.ExitCode
+
+        # Save partial output for version extraction even on failure
+        if (-not [string]::IsNullOrWhiteSpace($OutputText)) {
+            $script:LastOffsetFinderOutput = $OutputText
+        }
 
         # If there's an error in output, try nosymbol version
         if ($OutputText -match "ERROR:" -or $ErrorText -match "ERROR:" -or [string]::IsNullOrWhiteSpace($OutputText)) {
@@ -268,43 +254,26 @@ function Invoke-OffsetFinder {
     }
 }
 
-# Get new offsets with progressive retry logic
-function Get-NewOffsets {
-    Write-Log "Running RDPWrapOffsetFinder.exe..."
+# Retry OffsetFinder with progressive delays (first attempt already done in Main)
+function Get-NewOffsetsRetry {
+    $TotalAttempts = $RetryDelays.Count
 
-    $TotalAttempts = $RetryDelays.Count + 1
-
-    # First attempt (immediate)
-    $Result = Invoke-OffsetFinder
-    if ($Result) {
-        return $Result
-    }
-
-    # Retry attempts with progressive delays
-    # Strategy: first 2 retries keep cache (in case it has good symbols),
-    # then clear cache and retry (in case cached PDB is incomplete/corrupt)
     for ($i = 0; $i -lt $RetryDelays.Count; $i++) {
         $Delay = $RetryDelays[$i]
         $DelayMin = [math]::Round($Delay / 60, 1)
         $AttemptNum = $i + 2
 
-        Write-Log "Attempt $AttemptNum of $TotalAttempts - waiting ${DelayMin} minutes before retry..." "WARN"
+        Write-Log "Attempt $AttemptNum of $($TotalAttempts + 1) - waiting ${DelayMin} minutes before retry..." "WARN"
         Start-Sleep -Seconds $Delay
-
-        # Clear symbol cache on 3rd retry and beyond (attempts 4+)
-        # This forces fresh PDB download in case cached PDB was incomplete
-        if ($i -ge 2) {
-            Clear-SymbolCache
-        }
 
         $Result = Invoke-OffsetFinder
         if ($Result) {
-            Write-Log "Succeeded on attempt $AttemptNum of $TotalAttempts"
+            Write-Log "Succeeded on attempt $AttemptNum of $($TotalAttempts + 1)"
             return $Result
         }
     }
 
-    Write-Log "All $TotalAttempts attempts failed" "ERROR"
+    Write-Log "All $($TotalAttempts + 1) attempts failed" "ERROR"
     return $null
 }
 
@@ -380,35 +349,32 @@ function Main {
         }
     }
 
-    # One-time cache cleanup - remove potentially corrupt PDB files from previous failed runs
-    $CacheCleanupMarker = Join-Path $ScriptDir ".cache_cleaned_v2"
-    if (-not (Test-Path $CacheCleanupMarker)) {
-        Write-Log "One-time symbol cache cleanup (v2)"
-        Clear-SymbolCache
-        Set-Content -Path $CacheCleanupMarker -Value (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    }
-
     # Check prerequisites
     if (-not (Test-Prerequisites)) {
         return 1
     }
 
-    # Early version check - get version directly from termsrv.dll and skip if already in INI
+    # Early check - skip if termsrv.dll hasn't changed since last successful run
+    $LastHashFile = Join-Path $ScriptDir ".last_termsrv_hash"
     if (-not $Force) {
         try {
-            $TermsrvVersion = (Get-Item $TermsrvPath).VersionInfo.FileVersion
-            Write-Log "Current termsrv.dll version: $TermsrvVersion"
+            $TermsrvHash = (Get-FileHash $TermsrvPath -Algorithm SHA256).Hash
+            Write-Log "Current termsrv.dll hash: $TermsrvHash"
 
-            $CurrentIni = Get-Content -Path $RdpWrapIniPath -Raw -Encoding UTF8
-            if (Test-VersionExists -Version $TermsrvVersion -IniContent $CurrentIni) {
-                Write-Log "Version $TermsrvVersion already exists in rdpwrap.ini - no action needed" "SUCCESS"
-                return 0
+            if (Test-Path $LastHashFile) {
+                $LastHash = (Get-Content $LastHashFile -Raw).Trim()
+                if ($LastHash -eq $TermsrvHash) {
+                    Write-Log "termsrv.dll unchanged since last successful check - no action needed" "SUCCESS"
+                    return 0
+                }
+                Write-Log "termsrv.dll has changed since last check - need to find offsets"
             }
-
-            Write-Log "Version $TermsrvVersion not found in rdpwrap.ini - need to find offsets"
+            else {
+                Write-Log "First run - need to verify offsets"
+            }
         }
         catch {
-            Write-Log "Could not pre-check version: $_ (continuing with OffsetFinder)" "WARN"
+            Write-Log "Could not pre-check hash: $_ (continuing with OffsetFinder)" "WARN"
         }
     }
 
@@ -417,11 +383,36 @@ function Main {
         Write-Log "Proceeding anyway, OffsetFinder may fail..." "WARN"
     }
 
-    # Get new offsets with progressive retry logic
-    $NewOffsets = Get-NewOffsets
+    # Try OffsetFinder once first
+    Write-Log "Running RDPWrapOffsetFinder.exe..."
+    $NewOffsets = Invoke-OffsetFinder
+
+    # If first attempt failed, check alternatives before retrying
+    if (-not $NewOffsets -and -not $Force) {
+        $PartialVersion = Get-VersionFromOutput -Output $script:LastOffsetFinderOutput
+        if ($PartialVersion) {
+            # Check if version already exists in INI
+            $CurrentIni = Get-Content -Path $RdpWrapIniPath -Raw -Encoding UTF8
+            if (Test-VersionExists -Version $PartialVersion -IniContent $CurrentIni) {
+                Write-Log "OffsetFinder failed but version $PartialVersion already exists in rdpwrap.ini - no action needed" "SUCCESS"
+                try {
+                    $SaveHash = (Get-FileHash $TermsrvPath -Algorithm SHA256).Hash
+                    Set-Content -Path $LastHashFile -Value $SaveHash
+                } catch {}
+                return 0
+            }
+
+            Write-Log "Version $PartialVersion not in rdpwrap.ini - continuing with retries"
+        }
+    }
+
+    # If still no offsets, retry OffsetFinder with progressive delays
     if (-not $NewOffsets) {
-        Write-Log "Failed to get new offsets" "ERROR"
-        return 1
+        $NewOffsets = Get-NewOffsetsRetry
+        if (-not $NewOffsets) {
+            Write-Log "Failed to get new offsets after all attempts" "ERROR"
+            return 1
+        }
     }
 
     # Extract version
@@ -439,6 +430,11 @@ function Main {
 
     if ((Test-VersionExists -Version $Version -IniContent $CurrentIni) -and -not $Force) {
         Write-Log "Version $Version already exists in rdpwrap.ini - no action needed" "SUCCESS"
+        # Save hash so next run skips immediately
+        try {
+            $SaveHash = (Get-FileHash $TermsrvPath -Algorithm SHA256).Hash
+            Set-Content -Path $LastHashFile -Value $SaveHash
+        } catch {}
         return 0
     }
 
@@ -461,6 +457,12 @@ function Main {
     }
 
     Write-Log "Update completed successfully" "SUCCESS"
+
+    # Save hash so next run skips immediately
+    try {
+        $SaveHash = (Get-FileHash $TermsrvPath -Algorithm SHA256).Hash
+        Set-Content -Path $LastHashFile -Value $SaveHash
+    } catch {}
 
     # Restart if requested
     if ($AutoRestart) {
