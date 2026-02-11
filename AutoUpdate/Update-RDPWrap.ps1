@@ -25,7 +25,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.2.2"
+$ScriptVersion = "2.2.3"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -408,15 +408,23 @@ function Main {
         Write-Log "Proceeding anyway, OffsetFinder may fail..." "WARN"
     }
 
+    # Log sym/ cache state for diagnostics
+    $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
+    $SymDir = Join-Path $OffsetFinderDir "sym"
+    if (Test-Path $SymDir) {
+        $PdbCount = @(Get-ChildItem $SymDir -Filter "*.pdb" -Recurse -ErrorAction SilentlyContinue).Count
+        Write-Log "Symbol cache: sym/ exists, $PdbCount PDB file(s)"
+    }
+    else {
+        Write-Log "Symbol cache: sym/ not found (will be created by OffsetFinder)"
+    }
+
     # Try OffsetFinder once first
     Write-Log "Running RDPWrapOffsetFinder.exe..."
     $NewOffsets = Invoke-OffsetFinder
 
     # If failed due to bad/incomplete cache, clear sym/ and retry once
     if (-not $NewOffsets -and $script:LastOffsetFinderOutput -match "not found") {
-        $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
-        $SymDir = Join-Path $OffsetFinderDir "sym"
-
         if (Test-Path $SymDir) {
             Write-Log "Bad/incomplete symbol cache detected - clearing sym/ and retrying..." "WARN"
             Remove-Item -Path $SymDir -Recurse -Force -ErrorAction SilentlyContinue
