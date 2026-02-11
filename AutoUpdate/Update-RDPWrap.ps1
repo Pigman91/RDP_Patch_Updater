@@ -24,6 +24,9 @@ param(
     [switch]$SkipSelfUpdate
 )
 
+# Script version
+$ScriptVersion = "2.1.0"
+
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Fallback to fixed path if $ScriptDir doesn't evaluate correctly
@@ -338,7 +341,7 @@ function Add-OffsetsToIni {
 
 # Main logic
 function Main {
-    Write-Log "========== Starting Update-RDPWrap =========="
+    Write-Log "========== Starting Update-RDPWrap v$ScriptVersion =========="
 
     # Self-update check (skip if we just updated to prevent loop)
     if (-not $SkipSelfUpdate) {
