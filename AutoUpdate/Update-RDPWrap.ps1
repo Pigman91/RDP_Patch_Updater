@@ -25,7 +25,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.1.0"
+$ScriptVersion = "2.2.1"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -357,8 +357,22 @@ function Main {
         return 1
     }
 
-    # Early check - skip if termsrv.dll hasn't changed since last successful run
+    # Force re-check after script upgrade
     $LastHashFile = Join-Path $ScriptDir ".last_termsrv_hash"
+    $LastVersionFile = Join-Path $ScriptDir ".last_script_version"
+    $ScriptUpgraded = $false
+
+    if (Test-Path $LastVersionFile) {
+        $LastVersion = (Get-Content $LastVersionFile -Raw).Trim()
+        if ($LastVersion -ne $ScriptVersion) {
+            Write-Log "Script upgraded ($LastVersion -> $ScriptVersion) - forcing full check"
+            Remove-Item -Path $LastHashFile -Force -ErrorAction SilentlyContinue
+            $ScriptUpgraded = $true
+        }
+    }
+    Set-Content -Path $LastVersionFile -Value $ScriptVersion
+
+    # Early check - skip if termsrv.dll hasn't changed since last successful run
     if (-not $Force) {
         try {
             $TermsrvHash = (Get-FileHash $TermsrvPath -Algorithm SHA256).Hash
@@ -389,6 +403,18 @@ function Main {
     # Try OffsetFinder once first
     Write-Log "Running RDPWrapOffsetFinder.exe..."
     $NewOffsets = Invoke-OffsetFinder
+
+    # If failed due to bad/incomplete cache, clear sym/ and retry once
+    if (-not $NewOffsets -and $script:LastOffsetFinderOutput -match "not found") {
+        $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
+        $SymDir = Join-Path $OffsetFinderDir "sym"
+
+        if (Test-Path $SymDir) {
+            Write-Log "Bad/incomplete symbol cache detected - clearing sym/ and retrying..." "WARN"
+            Remove-Item -Path $SymDir -Recurse -Force -ErrorAction SilentlyContinue
+            $NewOffsets = Invoke-OffsetFinder
+        }
+    }
 
     # If first attempt failed, check alternatives before retrying
     if (-not $NewOffsets -and -not $Force) {
