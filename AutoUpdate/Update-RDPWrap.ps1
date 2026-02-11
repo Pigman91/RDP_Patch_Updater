@@ -380,10 +380,7 @@ function Main {
         Write-Log "Proceeding anyway, OffsetFinder may fail..." "WARN"
     }
 
-    # Clear symbol cache before first attempt
-    Clear-SymbolCache
-
-    # Get new offsets
+    # Get new offsets (symbol cache is cleared only between retries, not before first attempt)
     $NewOffsets = Get-NewOffsets
     if (-not $NewOffsets) {
         Write-Log "Failed to get new offsets" "ERROR"
