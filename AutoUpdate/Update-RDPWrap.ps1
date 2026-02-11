@@ -25,7 +25,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.4.0"
+$ScriptVersion = "2.5.0"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -131,6 +131,172 @@ function Wait-ForNetwork {
 
     Write-Log "Network not available after ${NetworkCheckTimeout}s" "ERROR"
     return $false
+}
+
+# Extract PDB GUID from DLL PE headers (needed to download PDB from Microsoft Symbol Server)
+function Get-PdbInfo {
+    param([string]$DllPath)
+
+    try {
+        $stream = [System.IO.File]::OpenRead($DllPath)
+        $reader = New-Object System.IO.BinaryReader($stream)
+
+        # DOS header - get PE offset
+        $stream.Position = 60
+        $peOffset = $reader.ReadUInt32()
+
+        # COFF header (skip PE signature)
+        $stream.Position = $peOffset + 4
+        $reader.ReadUInt16() | Out-Null  # machine
+        $numberOfSections = $reader.ReadUInt16()
+        $reader.ReadBytes(12) | Out-Null  # skip timeDateStamp, pointerToSymbolTable, numberOfSymbols
+        $sizeOfOptionalHeader = $reader.ReadUInt16()
+        $reader.ReadUInt16() | Out-Null  # characteristics
+
+        # Optional header
+        $optionalHeaderOffset = $stream.Position
+        $magic = $reader.ReadUInt16()
+        $is64Bit = ($magic -eq 0x20B)
+
+        # Debug directory is 7th data directory entry (index 6)
+        $dataDirOffset = $optionalHeaderOffset + $(if ($is64Bit) { 112 } else { 96 }) + (6 * 8)
+        $stream.Position = $dataDirOffset
+        $debugDirRva = $reader.ReadUInt32()
+        $debugDirSize = $reader.ReadUInt32()
+
+        if ($debugDirRva -eq 0) {
+            $reader.Close(); $stream.Close()
+            return $null
+        }
+
+        # Find section containing debug directory
+        $sectionHeaderOffset = $optionalHeaderOffset + $sizeOfOptionalHeader
+        $debugDirFileOffset = 0
+
+        for ($i = 0; $i -lt $numberOfSections; $i++) {
+            $stream.Position = $sectionHeaderOffset + ($i * 40) + 8
+            $virtualSize = $reader.ReadUInt32()
+            $sectionRva = $reader.ReadUInt32()
+            $reader.ReadUInt32() | Out-Null  # sizeOfRawData
+            $pointerToRawData = $reader.ReadUInt32()
+
+            if ($debugDirRva -ge $sectionRva -and $debugDirRva -lt ($sectionRva + $virtualSize)) {
+                $debugDirFileOffset = $pointerToRawData + ($debugDirRva - $sectionRva)
+                break
+            }
+        }
+
+        if ($debugDirFileOffset -eq 0) {
+            $reader.Close(); $stream.Close()
+            return $null
+        }
+
+        # Read debug directory entries looking for CodeView (type 2)
+        $stream.Position = $debugDirFileOffset
+        $numEntries = [int]($debugDirSize / 28)
+
+        for ($i = 0; $i -lt $numEntries; $i++) {
+            $reader.ReadBytes(12) | Out-Null  # characteristics, timeDateStamp, version
+            $type = $reader.ReadUInt32()
+            $reader.ReadUInt32() | Out-Null  # sizeOfData
+            $reader.ReadUInt32() | Out-Null  # addressOfRawData
+            $ptrToRawData = $reader.ReadUInt32()
+
+            if ($type -eq 2) {  # IMAGE_DEBUG_TYPE_CODEVIEW
+                $savedPos = $stream.Position
+                $stream.Position = $ptrToRawData
+                $cvSig = $reader.ReadUInt32()
+
+                if ($cvSig -eq 0x53445352) {  # "RSDS"
+                    $guidBytes = $reader.ReadBytes(16)
+                    $guid = New-Object System.Guid(,$guidBytes)
+                    $age = $reader.ReadUInt32()
+
+                    $nameBytes = New-Object System.Collections.ArrayList
+                    while ($true) {
+                        $b = $reader.ReadByte()
+                        if ($b -eq 0) { break }
+                        [void]$nameBytes.Add($b)
+                    }
+                    $pdbName = [System.IO.Path]::GetFileName(
+                        [System.Text.Encoding]::ASCII.GetString($nameBytes.ToArray())
+                    )
+                    $symbolId = $guid.ToString("N").ToUpper() + $age.ToString()
+
+                    $reader.Close(); $stream.Close()
+                    return @{
+                        PdbName  = $pdbName
+                        SymbolId = $symbolId
+                        Url      = "https://msdl.microsoft.com/download/symbols/$pdbName/$symbolId/$pdbName"
+                    }
+                }
+                $stream.Position = $savedPos
+            }
+        }
+
+        $reader.Close(); $stream.Close()
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
+# Pre-download PDB from Microsoft Symbol Server using PowerShell HTTP client
+# (symsrv.dll inside OffsetFinder uses WinINet which fails in non-interactive Task Scheduler sessions)
+function Ensure-PdbCached {
+    $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
+    $SymDir = Join-Path $OffsetFinderDir "sym"
+
+    $PdbInfo = Get-PdbInfo -DllPath $TermsrvPath
+    if (-not $PdbInfo) {
+        Write-Log "Could not extract PDB info from termsrv.dll (will rely on OffsetFinder)" "WARN"
+        return $false
+    }
+
+    Write-Log "PDB: $($PdbInfo.PdbName) [$($PdbInfo.SymbolId)]"
+
+    # Check if PDB is already cached
+    $PdbCachePath = Join-Path $SymDir "$($PdbInfo.PdbName)\$($PdbInfo.SymbolId)\$($PdbInfo.PdbName)"
+    if (Test-Path $PdbCachePath) {
+        $PdbSize = (Get-Item $PdbCachePath).Length
+        if ($PdbSize -gt 0) {
+            Write-Log "PDB already cached ($([math]::Round($PdbSize / 1MB, 2)) MB)"
+            return $true
+        }
+        # Zero-byte PDB = corrupted, remove it
+        Remove-Item -Path $PdbCachePath -Force -ErrorAction SilentlyContinue
+    }
+
+    # Download PDB via PowerShell (works in non-interactive sessions unlike symsrv.dll)
+    Write-Log "Downloading PDB from Microsoft Symbol Server..."
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        $PdbDir = Split-Path -Parent $PdbCachePath
+        if (-not (Test-Path $PdbDir)) {
+            New-Item -ItemType Directory -Path $PdbDir -Force | Out-Null
+        }
+
+        $SW = [System.Diagnostics.Stopwatch]::StartNew()
+        Invoke-WebRequest -Uri $PdbInfo.Url -OutFile $PdbCachePath -UseBasicParsing -TimeoutSec 120
+        $SW.Stop()
+
+        $DownloadedSize = (Get-Item $PdbCachePath).Length
+        if ($DownloadedSize -gt 0) {
+            Write-Log "PDB downloaded: $([math]::Round($DownloadedSize / 1MB, 2)) MB in $([math]::Round($SW.Elapsed.TotalSeconds, 1))s" "SUCCESS"
+            return $true
+        }
+        else {
+            Write-Log "PDB download returned empty file" "WARN"
+            Remove-Item -Path $PdbCachePath -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+    }
+    catch {
+        Write-Log "PDB download failed: $_ (will rely on OffsetFinder)" "WARN"
+        Remove-Item -Path $PdbCachePath -Force -ErrorAction SilentlyContinue
+        return $false
+    }
 }
 
 # Self-update: check GitHub for newer script version
@@ -269,6 +435,7 @@ function Get-NewOffsetsRetry {
         Write-Log "Attempt $AttemptNum of $($TotalAttempts + 1) - waiting ${DelayMin} minutes before retry..." "WARN"
         Start-Sleep -Seconds $Delay
 
+        Ensure-PdbCached
         $Result = Invoke-OffsetFinder
         if ($Result) {
             Write-Log "Succeeded on attempt $AttemptNum of $($TotalAttempts + 1)"
@@ -408,69 +575,43 @@ function Main {
         Write-Log "Proceeding anyway, OffsetFinder may fail..." "WARN"
     }
 
-    # Log sym/ cache state for diagnostics
+    # Pre-download PDB from Microsoft Symbol Server
+    # (symsrv.dll inside OffsetFinder uses WinINet which fails in non-interactive Task Scheduler sessions)
     $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
     $SymDir = Join-Path $OffsetFinderDir "sym"
-    if (Test-Path $SymDir) {
-        $PdbCount = @(Get-ChildItem $SymDir -Filter "*.pdb" -Recurse -ErrorAction SilentlyContinue).Count
-        Write-Log "Symbol cache: sym/ exists, $PdbCount PDB file(s)"
-    }
-    else {
-        Write-Log "Symbol cache: sym/ not found (will be created by OffsetFinder)"
-    }
+    Ensure-PdbCached
 
-    # Try OffsetFinder once first
+    # Try OffsetFinder
     Write-Log "Running RDPWrapOffsetFinder.exe..."
     $NewOffsets = Invoke-OffsetFinder
 
-    # If failed due to bad/incomplete cache, clear sym/ and retry once
+    # If failed with "not found" errors, clear bad cache and retry with fresh PDB download
     if (-not $NewOffsets -and $script:LastOffsetFinderOutput -match "not found") {
-        if (Test-Path $SymDir) {
-            Write-Log "Bad/incomplete symbol cache detected - clearing sym/ and retrying..." "WARN"
-            Remove-Item -Path $SymDir -Recurse -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
+        Write-Log "OffsetFinder failed - clearing cache and re-downloading PDB..." "WARN"
 
+        # Remove entire sym/ directory
+        if (Test-Path $SymDir) {
+            Remove-Item -Path $SymDir -Recurse -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
             if (Test-Path $SymDir) {
-                Write-Log "sym/ could not be fully deleted, forcing..." "WARN"
                 cmd /c "rmdir /s /q `"$SymDir`"" 2>$null
                 Start-Sleep -Seconds 1
             }
+        }
 
-            # Also delete any stray pingme.txt in OffsetFinder root (symsrv.dll negative cache marker)
-            $PingmeRoot = Join-Path $OffsetFinderDir "pingme.txt"
-            if (Test-Path $PingmeRoot) {
-                Remove-Item -Path $PingmeRoot -Force -ErrorAction SilentlyContinue
-                Write-Log "Removed stray pingme.txt from OffsetFinder directory"
-            }
+        # Remove stray pingme.txt (symsrv.dll negative cache marker)
+        $PingmeRoot = Join-Path $OffsetFinderDir "pingme.txt"
+        Remove-Item -Path $PingmeRoot -Force -ErrorAction SilentlyContinue
 
-            if (Test-Path $SymDir) {
-                Write-Log "sym/ still exists after deletion attempts" "ERROR"
+        # Re-download PDB via PowerShell HTTP and retry
+        if (Ensure-PdbCached) {
+            Write-Log "PDB re-downloaded, retrying OffsetFinder..."
+            $NewOffsets = Invoke-OffsetFinder
+            if ($NewOffsets) {
+                Write-Log "Retry after PDB re-download succeeded" "SUCCESS"
             }
             else {
-                # symsrv.dll has a time-based blackout after failed downloads
-                # Wait 15 seconds to ensure the blackout period expires before retry
-                Write-Log "sym/ cleared, waiting 15s for symbol server blackout to expire..."
-                Start-Sleep -Seconds 15
-                Write-Log "Retrying OffsetFinder with clean cache..."
-                $RetrySW = [System.Diagnostics.Stopwatch]::StartNew()
-                $NewOffsets = Invoke-OffsetFinder
-                $RetrySW.Stop()
-                $RetrySeconds = [math]::Round($RetrySW.Elapsed.TotalSeconds, 1)
-
-                if ($NewOffsets) {
-                    Write-Log "Cache-retry succeeded (${RetrySeconds}s)" "SUCCESS"
-                }
-                else {
-                    Write-Log "Cache-retry failed (${RetrySeconds}s) - will continue to retry loop" "WARN"
-                    # Check if PDB was actually downloaded during retry
-                    if (Test-Path $SymDir) {
-                        $RetryPdbCount = @(Get-ChildItem $SymDir -Filter "*.pdb" -Recurse -ErrorAction SilentlyContinue).Count
-                        Write-Log "After retry: sym/ has $RetryPdbCount PDB file(s)" "WARN"
-                    }
-                    else {
-                        Write-Log "After retry: sym/ was not created (download did not start)" "WARN"
-                    }
-                }
+                Write-Log "Retry after PDB re-download still failed" "WARN"
             }
         }
     }
