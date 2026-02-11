@@ -20,7 +20,8 @@
 
 param(
     [switch]$AutoRestart,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SkipSelfUpdate
 )
 
 # Configuration
@@ -34,9 +35,17 @@ $TermsrvPath = "C:\Windows\System32\termsrv.dll"
 $RdpWrapIniPath = "C:\Program Files\RDP Wrapper\rdpwrap.ini"
 $LogFile = Join-Path $ScriptDir "Update-RDPWrap.log"
 
-# Retry configuration
-$MaxRetries = 3
-$RetryDelaySeconds = 60
+# Self-update configuration
+$SelfUpdateUrl = "https://pigman91.github.io/RDP_Patch_Updater/AutoUpdate/Update-RDPWrap.ps1"
+$ScriptPath = $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrEmpty($ScriptPath)) {
+    $ScriptPath = Join-Path $ScriptDir "Update-RDPWrap.ps1"
+}
+
+# Retry configuration - progressive delays in seconds
+# Attempt 1: immediate, then 2min, 5min, 15min, 30min, 60min (total ~112 min)
+$RetryDelays = @(120, 300, 900, 1800, 3600)
+$NetworkCheckTimeout = 300  # Max 5 min wait for network at startup
 
 # Logging function
 function Write-Log {
@@ -74,6 +83,111 @@ function Test-Prerequisites {
 
     Write-Log "All prerequisites met"
     return $true
+}
+
+# Test if network (symbol server) is reachable
+function Test-NetworkReady {
+    $Hosts = @("msdl.microsoft.com", "microsoft.com")
+    foreach ($H in $Hosts) {
+        try {
+            $Tcp = New-Object System.Net.Sockets.TcpClient
+            $AsyncResult = $Tcp.BeginConnect($H, 443, $null, $null)
+            $Wait = $AsyncResult.AsyncWaitHandle.WaitOne(5000, $false)
+            if ($Wait -and $Tcp.Connected) {
+                $Tcp.Close()
+                return $true
+            }
+            $Tcp.Close()
+        }
+        catch {}
+    }
+    return $false
+}
+
+# Wait for network connectivity before proceeding
+function Wait-ForNetwork {
+    Write-Log "Checking network connectivity..."
+
+    if (Test-NetworkReady) {
+        Write-Log "Network is available"
+        return $true
+    }
+
+    $Elapsed = 0
+    $CheckInterval = 15
+    while ($Elapsed -lt $NetworkCheckTimeout) {
+        Write-Log "Network not ready, waiting ${CheckInterval}s... (${Elapsed}s/${NetworkCheckTimeout}s)" "WARN"
+        Start-Sleep -Seconds $CheckInterval
+        $Elapsed += $CheckInterval
+
+        if (Test-NetworkReady) {
+            Write-Log "Network is available (after ${Elapsed}s)"
+            return $true
+        }
+    }
+
+    Write-Log "Network not available after ${NetworkCheckTimeout}s" "ERROR"
+    return $false
+}
+
+# Clear local symbol cache to prevent stale negative-lookup entries
+function Clear-SymbolCache {
+    $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
+    $CachePaths = @(
+        (Join-Path $OffsetFinderDir "sym")
+        (Join-Path $OffsetFinderDir "symbols")
+        (Join-Path $OffsetFinderDir "SymCache")
+    )
+
+    foreach ($CachePath in $CachePaths) {
+        if (Test-Path $CachePath) {
+            try {
+                Remove-Item -Path $CachePath -Recurse -Force
+                Write-Log "Cleared symbol cache: $CachePath"
+            }
+            catch {
+                Write-Log "Could not clear symbol cache ${CachePath}: $_" "WARN"
+            }
+        }
+    }
+}
+
+# Self-update: check GitHub for newer script version
+function Update-Self {
+    Write-Log "Checking for script updates..."
+
+    $TempScript = Join-Path $ScriptDir "Update-RDPWrap_update.ps1"
+
+    try {
+        Invoke-WebRequest -Uri $SelfUpdateUrl -OutFile $TempScript -UseBasicParsing -TimeoutSec 30
+
+        $LocalHash = (Get-FileHash -Path $ScriptPath -Algorithm SHA256).Hash
+        $RemoteHash = (Get-FileHash -Path $TempScript -Algorithm SHA256).Hash
+
+        if ($LocalHash -ne $RemoteHash) {
+            Write-Log "New script version found, updating..."
+            Copy-Item -Path $TempScript -Destination $ScriptPath -Force
+            Write-Log "Script updated successfully, restarting with new version..." "SUCCESS"
+
+            # Relaunch with same arguments + SkipSelfUpdate to prevent loop
+            $RelaunchArgs = "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$ScriptPath`" -SkipSelfUpdate"
+            if ($AutoRestart) { $RelaunchArgs += " -AutoRestart" }
+            if ($Force) { $RelaunchArgs += " -Force" }
+
+            Start-Process "powershell.exe" -ArgumentList $RelaunchArgs
+            return $true
+        }
+
+        Write-Log "Script is up to date"
+        return $false
+    }
+    catch {
+        Write-Log "Self-update check failed: $_ (continuing with current version)" "WARN"
+        return $false
+    }
+    finally {
+        Remove-Item -Path $TempScript -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # Run OffsetFinder once (internal function)
@@ -149,28 +263,38 @@ function Invoke-OffsetFinder {
     }
 }
 
-# Get new offsets with retry logic
+# Get new offsets with progressive retry logic
 function Get-NewOffsets {
     Write-Log "Running RDPWrapOffsetFinder.exe..."
 
-    for ($Attempt = 1; $Attempt -le $MaxRetries; $Attempt++) {
-        if ($Attempt -gt 1) {
-            Write-Log "Retry attempt $Attempt of $MaxRetries..."
-        }
+    $TotalAttempts = $RetryDelays.Count + 1
+
+    # First attempt (immediate)
+    $Result = Invoke-OffsetFinder
+    if ($Result) {
+        return $Result
+    }
+
+    # Retry attempts with progressive delays
+    for ($i = 0; $i -lt $RetryDelays.Count; $i++) {
+        $Delay = $RetryDelays[$i]
+        $DelayMin = [math]::Round($Delay / 60, 1)
+        $AttemptNum = $i + 2
+
+        Write-Log "Attempt $AttemptNum of $TotalAttempts - waiting ${DelayMin} minutes before retry..." "WARN"
+        Start-Sleep -Seconds $Delay
+
+        # Clear symbol cache before retry to remove stale negative-lookup entries
+        Clear-SymbolCache
 
         $Result = Invoke-OffsetFinder
-
         if ($Result) {
+            Write-Log "Succeeded on attempt $AttemptNum of $TotalAttempts"
             return $Result
-        }
-
-        if ($Attempt -lt $MaxRetries) {
-            Write-Log "Waiting $RetryDelaySeconds seconds before retry..." "WARN"
-            Start-Sleep -Seconds $RetryDelaySeconds
         }
     }
 
-    Write-Log "All $MaxRetries attempts failed" "ERROR"
+    Write-Log "All $TotalAttempts attempts failed" "ERROR"
     return $null
 }
 
@@ -237,10 +361,27 @@ function Add-OffsetsToIni {
 function Main {
     Write-Log "========== Starting Update-RDPWrap =========="
 
+    # Self-update check (skip if we just updated to prevent loop)
+    if (-not $SkipSelfUpdate) {
+        $WasUpdated = Update-Self
+        if ($WasUpdated) {
+            Write-Log "Exiting - new version has been launched"
+            return 0
+        }
+    }
+
     # Check prerequisites
     if (-not (Test-Prerequisites)) {
         return 1
     }
+
+    # Wait for network connectivity (important at system startup)
+    if (-not (Wait-ForNetwork)) {
+        Write-Log "Proceeding anyway, OffsetFinder may fail..." "WARN"
+    }
+
+    # Clear symbol cache before first attempt
+    Clear-SymbolCache
 
     # Get new offsets
     $NewOffsets = Get-NewOffsets
