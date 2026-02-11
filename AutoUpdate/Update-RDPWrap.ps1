@@ -25,7 +25,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.2.3"
+$ScriptVersion = "2.3.0"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -428,7 +428,21 @@ function Main {
         if (Test-Path $SymDir) {
             Write-Log "Bad/incomplete symbol cache detected - clearing sym/ and retrying..." "WARN"
             Remove-Item -Path $SymDir -Recurse -Force -ErrorAction SilentlyContinue
-            $NewOffsets = Invoke-OffsetFinder
+            Start-Sleep -Seconds 2
+
+            if (Test-Path $SymDir) {
+                Write-Log "sym/ could not be fully deleted, forcing..." "WARN"
+                cmd /c "rmdir /s /q `"$SymDir`"" 2>$null
+                Start-Sleep -Seconds 1
+            }
+
+            if (Test-Path $SymDir) {
+                Write-Log "sym/ still exists after deletion attempts" "ERROR"
+            }
+            else {
+                Write-Log "sym/ cleared, retrying OffsetFinder..."
+                $NewOffsets = Invoke-OffsetFinder
+            }
         }
     }
 
