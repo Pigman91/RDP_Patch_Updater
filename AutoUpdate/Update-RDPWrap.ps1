@@ -281,6 +281,8 @@ function Get-NewOffsets {
     }
 
     # Retry attempts with progressive delays
+    # Strategy: first 2 retries keep cache (in case it has good symbols),
+    # then clear cache and retry (in case cached PDB is incomplete/corrupt)
     for ($i = 0; $i -lt $RetryDelays.Count; $i++) {
         $Delay = $RetryDelays[$i]
         $DelayMin = [math]::Round($Delay / 60, 1)
@@ -289,8 +291,11 @@ function Get-NewOffsets {
         Write-Log "Attempt $AttemptNum of $TotalAttempts - waiting ${DelayMin} minutes before retry..." "WARN"
         Start-Sleep -Seconds $Delay
 
-        # Clear symbol cache before retry to remove stale negative-lookup entries
-        Clear-SymbolCache
+        # Clear symbol cache on 3rd retry and beyond (attempts 4+)
+        # This forces fresh PDB download in case cached PDB was incomplete
+        if ($i -ge 2) {
+            Clear-SymbolCache
+        }
 
         $Result = Invoke-OffsetFinder
         if ($Result) {
@@ -375,9 +380,36 @@ function Main {
         }
     }
 
+    # One-time cache cleanup - remove potentially corrupt PDB files from previous failed runs
+    $CacheCleanupMarker = Join-Path $ScriptDir ".cache_cleaned_v2"
+    if (-not (Test-Path $CacheCleanupMarker)) {
+        Write-Log "One-time symbol cache cleanup (v2)"
+        Clear-SymbolCache
+        Set-Content -Path $CacheCleanupMarker -Value (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    }
+
     # Check prerequisites
     if (-not (Test-Prerequisites)) {
         return 1
+    }
+
+    # Early version check - get version directly from termsrv.dll and skip if already in INI
+    if (-not $Force) {
+        try {
+            $TermsrvVersion = (Get-Item $TermsrvPath).VersionInfo.FileVersion
+            Write-Log "Current termsrv.dll version: $TermsrvVersion"
+
+            $CurrentIni = Get-Content -Path $RdpWrapIniPath -Raw -Encoding UTF8
+            if (Test-VersionExists -Version $TermsrvVersion -IniContent $CurrentIni) {
+                Write-Log "Version $TermsrvVersion already exists in rdpwrap.ini - no action needed" "SUCCESS"
+                return 0
+            }
+
+            Write-Log "Version $TermsrvVersion not found in rdpwrap.ini - need to find offsets"
+        }
+        catch {
+            Write-Log "Could not pre-check version: $_ (continuing with OffsetFinder)" "WARN"
+        }
     }
 
     # Wait for network connectivity (important at system startup)
@@ -385,7 +417,7 @@ function Main {
         Write-Log "Proceeding anyway, OffsetFinder may fail..." "WARN"
     }
 
-    # Get new offsets (symbol cache is cleared only between retries, not before first attempt)
+    # Get new offsets with progressive retry logic
     $NewOffsets = Get-NewOffsets
     if (-not $NewOffsets) {
         Write-Log "Failed to get new offsets" "ERROR"
