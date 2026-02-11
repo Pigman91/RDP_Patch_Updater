@@ -25,7 +25,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.3.0"
+$ScriptVersion = "2.4.0"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -436,12 +436,41 @@ function Main {
                 Start-Sleep -Seconds 1
             }
 
+            # Also delete any stray pingme.txt in OffsetFinder root (symsrv.dll negative cache marker)
+            $PingmeRoot = Join-Path $OffsetFinderDir "pingme.txt"
+            if (Test-Path $PingmeRoot) {
+                Remove-Item -Path $PingmeRoot -Force -ErrorAction SilentlyContinue
+                Write-Log "Removed stray pingme.txt from OffsetFinder directory"
+            }
+
             if (Test-Path $SymDir) {
                 Write-Log "sym/ still exists after deletion attempts" "ERROR"
             }
             else {
-                Write-Log "sym/ cleared, retrying OffsetFinder..."
+                # symsrv.dll has a time-based blackout after failed downloads
+                # Wait 15 seconds to ensure the blackout period expires before retry
+                Write-Log "sym/ cleared, waiting 15s for symbol server blackout to expire..."
+                Start-Sleep -Seconds 15
+                Write-Log "Retrying OffsetFinder with clean cache..."
+                $RetrySW = [System.Diagnostics.Stopwatch]::StartNew()
                 $NewOffsets = Invoke-OffsetFinder
+                $RetrySW.Stop()
+                $RetrySeconds = [math]::Round($RetrySW.Elapsed.TotalSeconds, 1)
+
+                if ($NewOffsets) {
+                    Write-Log "Cache-retry succeeded (${RetrySeconds}s)" "SUCCESS"
+                }
+                else {
+                    Write-Log "Cache-retry failed (${RetrySeconds}s) - will continue to retry loop" "WARN"
+                    # Check if PDB was actually downloaded during retry
+                    if (Test-Path $SymDir) {
+                        $RetryPdbCount = @(Get-ChildItem $SymDir -Filter "*.pdb" -Recurse -ErrorAction SilentlyContinue).Count
+                        Write-Log "After retry: sym/ has $RetryPdbCount PDB file(s)" "WARN"
+                    }
+                    else {
+                        Write-Log "After retry: sym/ was not created (download did not start)" "WARN"
+                    }
+                }
             }
         }
     }
