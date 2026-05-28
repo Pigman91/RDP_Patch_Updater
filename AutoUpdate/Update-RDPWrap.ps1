@@ -30,7 +30,33 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.6.0"
+$ScriptVersion = "2.7.0"
+
+# Patch byte sequences referenced by *Code.x64 keys in per-version INI sections
+# that may be missing from [PatchCodes] in older rdpwrap.ini files. When a new
+# Windows build introduces a new patch site, OffsetFinder emits the new code
+# name (e.g. CDefPolicy_Query_r9d_rdi_jmp) - but unless the byte sequence is
+# also defined in [PatchCodes], rdpwrap.dll patches the offset with nothing
+# and the wrapper appears to work while silently doing nothing.
+# Hex values are the canonical ones from sebaxakerhtc/rdpwrap.ini master
+# (https://raw.githubusercontent.com/sebaxakerhtc/rdpwrap.ini/master/rdpwrap.ini).
+$KnownPatchCodes = @{
+    # 24H2/25H2 DefPolicy patch: mov dword ptr [rdi+0x638], 0x100; jmp short
+    'CDefPolicy_Query_r9d_rdi_jmp' = 'C7873806000000010000EB'
+    # 24H2/25H2 SingleUser patch: mov eax,1; nop; nop  (return true from IsSingleSessionPerUserEnabled)
+    'mov_eax_1_nop_2'              = 'B8010000009090'
+}
+
+# Hex values that earlier broken builds of this updater (or external sources)
+# may have injected with the wrong byte sequence. On every run we replace
+# these with the canonical hex so existing clients self-heal without a
+# manual fix. Format: PatchCodeName -> @{ Wrong = bad-hex; Right = good-hex }.
+$WrongPatchCodes = @{
+    'CDefPolicy_Query_r9d_rdi_jmp' = @{
+        Wrong = '41B90001000044898F380600000F1F4000EB'  # 19B - overwrote adjacent instruction
+        Right = 'C7873806000000010000EB'                # 11B - canonical
+    }
+}
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -558,6 +584,109 @@ function Test-VersionExists {
     return $IniContent -match $Pattern
 }
 
+# Inject any missing $KnownPatchCodes entries into [PatchCodes] section.
+# Returns: hashtable @{ Content = updated INI string; Injected = list of injected names }.
+# If no injection was needed, Injected is empty and Content equals the input.
+function Add-MissingPatchCodes {
+    param([string]$IniContent)
+
+    $Result = @{ Content = $IniContent; Injected = @() }
+
+    $MissingCodes = @()
+    foreach ($Name in $KnownPatchCodes.Keys) {
+        $Pattern = "(?m)^\s*${Name}\s*="
+        if ($IniContent -notmatch $Pattern) {
+            $MissingCodes += $Name
+        }
+    }
+    if ($MissingCodes.Count -eq 0) { return $Result }
+
+    $Lines = $IniContent -split "`r?`n"
+
+    $StartIdx = -1
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '^\[PatchCodes\]\s*$') { $StartIdx = $i; break }
+    }
+    if ($StartIdx -lt 0) {
+        Write-Log "[PatchCodes] section not found - cannot inject" "WARN"
+        return $Result
+    }
+
+    # Find first line that starts a new section after [PatchCodes]
+    $NextSectionIdx = $Lines.Count
+    for ($i = $StartIdx + 1; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '^\[') { $NextSectionIdx = $i; break }
+    }
+    # Insert before the next section, skipping any trailing blank lines inside [PatchCodes]
+    $InsertIdx = $NextSectionIdx
+    while ($InsertIdx -gt $StartIdx + 1 -and [string]::IsNullOrWhiteSpace($Lines[$InsertIdx - 1])) {
+        $InsertIdx--
+    }
+
+    $Today = Get-Date -Format 'yyyy-MM-dd'
+    $InjectLines = @()
+    foreach ($Name in $MissingCodes) {
+        $InjectLines += "; auto-added by Update-RDPWrap v$ScriptVersion on $Today (24H2/25H2 fix)"
+        $InjectLines += "$Name=$($KnownPatchCodes[$Name])"
+    }
+
+    $Before = if ($InsertIdx -gt 0) { $Lines[0..($InsertIdx - 1)] } else { @() }
+    $After  = if ($InsertIdx -lt $Lines.Count) { $Lines[$InsertIdx..($Lines.Count - 1)] } else { @() }
+    $Merged = @($Before) + $InjectLines + @($After)
+
+    $Result.Content  = $Merged -join "`r`n"
+    $Result.Injected = $MissingCodes
+    return $Result
+}
+
+# Replace any PatchCode entry whose hex matches a known-broken value with the
+# correct canonical hex. Returns @{ Content; Fixed = list-of-names }.
+function Repair-WrongPatchCodes {
+    param([string]$IniContent)
+    $Result = @{ Content = $IniContent; Fixed = @() }
+    foreach ($Name in $WrongPatchCodes.Keys) {
+        $W = $WrongPatchCodes[$Name].Wrong
+        $R = $WrongPatchCodes[$Name].Right
+        $Pattern = "(?m)^${Name}=$([regex]::Escape($W))\s*$"
+        if ($Result.Content -match $Pattern) {
+            $Result.Content = $Result.Content -replace $Pattern, "${Name}=$R"
+            $Result.Fixed += $Name
+        }
+    }
+    return $Result
+}
+
+# Run both Repair-WrongPatchCodes and Add-MissingPatchCodes against rdpwrap.ini.
+# Restart TermService if either modified the file. No-op if INI is already good.
+function Update-PatchCodesInIni {
+    $CurrentContent = Get-Content -Path $RdpWrapIniPath -Raw -Encoding UTF8
+
+    $Repair = Repair-WrongPatchCodes -IniContent $CurrentContent
+    $Add    = Add-MissingPatchCodes -IniContent $Repair.Content
+
+    $Changed = ($Repair.Fixed.Count + $Add.Injected.Count) -gt 0
+    if (-not $Changed) { return $false }
+
+    if ($Repair.Fixed.Count -gt 0)   { Write-Log ("Fixed wrong PatchCode hex: " + ($Repair.Fixed -join ', ')) "WARN" }
+    if ($Add.Injected.Count -gt 0)   { Write-Log ("Injected missing PatchCode(s): " + ($Add.Injected -join ', ')) }
+
+    Backup-IniFile | Out-Null
+    $TempFile = Join-Path $ScriptDir "rdpwrap_patchcodes.ini"
+    Set-Content -Path $TempFile -Value $Add.Content -Encoding UTF8 -NoNewline
+    Copy-Item -Path $TempFile -Destination $RdpWrapIniPath -Force
+    Remove-Item -Path $TempFile -Force -ErrorAction SilentlyContinue
+    Write-Log "rdpwrap.ini [PatchCodes] updated" "SUCCESS"
+
+    try {
+        Restart-Service -Name TermService -Force -ErrorAction Stop
+        Write-Log "TermService restarted - new patch bytes are now active" "SUCCESS"
+    }
+    catch {
+        Write-Log "TermService restart failed: $_ (a reboot will pick up the change)" "WARN"
+    }
+    return $true
+}
+
 # Create backup
 function Backup-IniFile {
     $BackupDir = Join-Path $ScriptDir "Backups"
@@ -627,6 +756,11 @@ function Main {
     if (-not (Test-Prerequisites)) {
         return 1
     }
+
+    # Ensure all known PatchCode byte sequences are present in [PatchCodes].
+    # Runs every time (not just when adding a new version section) so existing
+    # clients whose INI is missing a code recover on the next scheduled run.
+    Update-PatchCodesInIni | Out-Null
 
     # Force re-check after script upgrade
     $LastHashFile = Join-Path $ScriptDir ".last_termsrv_hash"
