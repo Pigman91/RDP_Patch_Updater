@@ -2,14 +2,6 @@
 
 Automatic offset updater for RDP Wrapper that keeps your `rdpwrap.ini` always up-to-date after Windows updates.
 
-## Support This Project
-
-If this tool helped you, you can support its development with a donation:
-
-<a href="https://www.paypal.com/donate/?hosted_button_id=J8DWRTBTMZKVE">
-  <img src="https://raw.githubusercontent.com/stefan-niedermann/paypal-donate-button/master/paypal-donate-button.png" alt="Donate with PayPal" width="300" />
-</a>
-
 ## Problem
 
 After every Windows update, the `termsrv.dll` file changes and RDP Wrapper stops working because the offsets in `rdpwrap.ini` no longer match. You have to manually find new offsets or wait for someone to update the INI file.
@@ -62,12 +54,48 @@ This AutoUpdate-only installer will:
 ## How It Works
 
 1. **Scheduled Task** "RDP Wrapper Auto Update" runs at system startup
-2. **Update-RDPWrap.ps1** executes RDPWrapOffsetFinder.exe against your termsrv.dll
-3. The tool extracts the version number (e.g., 10.0.26100.2605)
-4. If this version is not found in `rdpwrap.ini`, the new offsets are added
-5. A backup of the original INI is created before any changes
-6. If AutoRestart is enabled, PC restarts in 30 seconds to apply changes
-7. You can cancel the restart by running `shutdown /a`
+2. **Update-RDPWrap.ps1** first downloads `manifest.json` and refreshes any of its own files (script, OffsetFinder, DLLs) whose SHA256 no longer matches — so binaries stay current, not just the script (see [Self-update](#self-update) below)
+3. The script executes RDPWrapOffsetFinder.exe against your termsrv.dll
+4. The tool extracts the version number (e.g., 10.0.26100.2605)
+5. If this version is not found in `rdpwrap.ini`, the new offsets are added
+6. A backup of the original INI is created before any changes
+7. If AutoRestart is enabled, PC restarts in 30 seconds to apply changes
+8. You can cancel the restart by running `shutdown /a`
+
+## Self-update
+
+Starting with v2.6.0 the updater pulls a `manifest.json` from
+`https://pigman91.github.io/RDP_Patch_Updater/AutoUpdate/manifest.json` listing
+every distributed file with its SHA256 hash. On each run the client compares the
+listed hashes against its local files and downloads only the ones that differ.
+Each downloaded file is hash-verified before it replaces the local copy.
+
+This is the difference from v2.5.x, where the self-updater only replaced the
+`.ps1` and never touched the OffsetFinder binaries — meaning a Windows update
+that broke the byte patterns in OffsetFinder could never be fixed remotely.
+
+### Publishing a new release
+
+Whenever any file inside `AutoUpdate/` changes (new OffsetFinder, script fix,
+…), regenerate the manifest before uploading:
+
+```powershell
+& .\AutoUpdate\Build-Manifest.ps1
+```
+
+Then upload the full `AutoUpdate/` folder — **including the regenerated
+`manifest.json`** — to the GitHub Pages mirror. If you upload new binaries but
+forget to refresh the manifest, clients will keep the old files.
+
+### Useful script parameters
+
+```powershell
+# Run only the manifest update step, skip OffsetFinder + INI patch
+.\Update-RDPWrap.ps1 -ManifestOnly
+
+# Point at an internal mirror or a test server instead of GitHub Pages
+.\Update-RDPWrap.ps1 -UpdateBaseUrl "http://mirror.local/rdp"
+```
 
 ## Installation Directory Structure
 
@@ -80,6 +108,8 @@ C:\Program Files\RDP Wrapper\
     ├── Install-ScheduledTask.ps1   # Scheduled task installer
     ├── Update-RDPWrap.ps1          # Main update script
     ├── Update-RDPWrap.log          # Log file
+    ├── .last_termsrv_hash          # Cached hash so unchanged DLLs skip the check
+    ├── .last_script_version        # Version marker, forces full check after upgrade
     ├── Backups\                    # INI backups before changes
     │   └── rdpwrap_YYYYMMDD_HHMMSS.ini
     └── OffsetFinder\
@@ -88,7 +118,25 @@ C:\Program Files\RDP Wrapper\
         ├── dbghelp.dll
         ├── symsrv.dll
         ├── Zydis.dll
-        └── symsrv.yes
+        ├── symsrv.yes
+        └── sym\                            # PDB cache (auto-managed)
+```
+
+### Repository / GitHub Pages layout
+
+```
+AutoUpdate/
+├── Install-ScheduledTask.ps1
+├── Update-RDPWrap.ps1
+├── Build-Manifest.ps1       # NOT distributed to clients — used to publish releases
+├── manifest.json            # SHA256 of every distributed file; clients fetch this first
+└── OffsetFinder/
+    ├── RDPWrapOffsetFinder.exe
+    ├── RDPWrapOffsetFinder_nosymbol.exe
+    ├── dbghelp.dll
+    ├── symsrv.dll
+    ├── Zydis.dll
+    └── symsrv.yes
 ```
 
 ## Manual Usage
@@ -128,7 +176,8 @@ C:\Program Files\RDP Wrapper\AutoUpdate\Update-RDPWrap.log
 ### Common issues:
 - **"RDPWrapOffsetFinder.exe not found"** - Reinstall using the installer
 - **"rdpwrap.ini not found"** - RDP Wrapper is not installed, use Complete installer
-- **"OffsetFinder could not find all offsets"** - Your Windows version might not be supported yet
+- **"OffsetFinder could not find all offsets" / "DefPolicyPatch patten not found"** - Microsoft changed an internal byte pattern in this `termsrv.dll`. Publish a refreshed `RDPWrapOffsetFinder.exe` in the GitHub Pages mirror (with a regenerated `manifest.json`); clients will pick it up on the next scheduled run.
+- **"Too many users connected" on the RDP login screen** - Same root cause: your current `termsrv.dll` version isn't in `rdpwrap.ini`, so the wrapper isn't active and Windows enforces its default single-session limit. The next successful updater run that adds the new version + a reboot fixes it.
 
 ## Credits
 
