@@ -21,11 +21,16 @@
 param(
     [switch]$AutoRestart,
     [switch]$Force,
-    [switch]$SkipSelfUpdate
+    [switch]$SkipSelfUpdate,
+    # Override the distribution base URL. Defaults to the public GitHub Pages mirror.
+    # Useful for internal mirrors or for testing against a file:/// path.
+    [string]$UpdateBaseUrl = "https://pigman91.github.io/RDP_Patch_Updater/AutoUpdate",
+    # If set, run the manifest update and exit (skip OffsetFinder + rdpwrap.ini patching).
+    [switch]$ManifestOnly
 )
 
 # Script version
-$ScriptVersion = "2.5.0"
+$ScriptVersion = "2.6.0"
 
 # Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -39,11 +44,15 @@ $RdpWrapIniPath = "C:\Program Files\RDP Wrapper\rdpwrap.ini"
 $LogFile = Join-Path $ScriptDir "Update-RDPWrap.log"
 
 # Self-update configuration
-$SelfUpdateUrl = "https://pigman91.github.io/RDP_Patch_Updater/AutoUpdate/Update-RDPWrap.ps1"
+# Manifest lists all distributed files (script + OffsetFinder + DLLs) with their SHA256 hashes.
+# Client downloads manifest, compares hashes, and replaces only files that differ.
+# $UpdateBaseUrl is exposed as a parameter so the URL can be overridden for testing or mirrors.
+$ManifestUrl = "$UpdateBaseUrl/manifest.json"
 $ScriptPath = $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrEmpty($ScriptPath)) {
     $ScriptPath = Join-Path $ScriptDir "Update-RDPWrap.ps1"
 }
+$ScriptFileName = "Update-RDPWrap.ps1"
 
 # Retry configuration - progressive delays in seconds
 # Attempt 1: immediate, then 2min, 5min, 15min, 30min, 60min (total ~112 min)
@@ -299,41 +308,124 @@ function Ensure-PdbCached {
     }
 }
 
-# Self-update: check GitHub for newer script version
-function Update-Self {
-    Write-Log "Checking for script updates..."
+# Self-update: download manifest.json from GitHub and refresh any files whose SHA256 differs.
+# Replaces the old script-only updater - now keeps OffsetFinder binaries in sync as well.
+# Returns $true if the script itself was updated and the caller should relaunch.
+# When -SkipScript is set, the Update-RDPWrap.ps1 entry in the manifest is ignored. This is
+# used after a 2.5.0->2.6.0 relaunch: the script was just replaced, but OffsetFinder may still
+# be stale (the legacy self-updater only touched the .ps1), so non-script files must be synced.
+function Update-FromManifest {
+    param([switch]$SkipScript)
 
-    $TempScript = Join-Path $ScriptDir "Update-RDPWrap_update.ps1"
+    Write-Log "Checking manifest for file updates..."
+
+    $TempManifest = Join-Path $ScriptDir "manifest_temp.json"
+    $ScriptUpdated = $false
 
     try {
-        Invoke-WebRequest -Uri $SelfUpdateUrl -OutFile $TempScript -UseBasicParsing -TimeoutSec 30
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $ManifestUrl -OutFile $TempManifest -UseBasicParsing -TimeoutSec 30
 
-        $LocalHash = (Get-FileHash -Path $ScriptPath -Algorithm SHA256).Hash
-        $RemoteHash = (Get-FileHash -Path $TempScript -Algorithm SHA256).Hash
+        $Manifest = Get-Content -Path $TempManifest -Raw -Encoding UTF8 | ConvertFrom-Json
 
-        if ($LocalHash -ne $RemoteHash) {
-            Write-Log "New script version found, updating..."
-            Copy-Item -Path $TempScript -Destination $ScriptPath -Force
-            Write-Log "Script updated successfully, restarting with new version..." "SUCCESS"
+        if (-not $Manifest.files) {
+            Write-Log "Manifest has no 'files' array" "WARN"
+            return $false
+        }
 
-            # Relaunch with same arguments + SkipSelfUpdate to prevent loop
+        $RemoteVersion = if ($Manifest.version) { $Manifest.version } else { "unknown" }
+        Write-Log "Manifest loaded (version $RemoteVersion, $($Manifest.files.Count) files)"
+
+        $UpdatedCount = 0
+        foreach ($Entry in $Manifest.files) {
+            if ([string]::IsNullOrWhiteSpace($Entry.path) -or [string]::IsNullOrWhiteSpace($Entry.sha256)) {
+                Write-Log "Skipping malformed manifest entry: $($Entry | ConvertTo-Json -Compress)" "WARN"
+                continue
+            }
+
+            $RelPath = $Entry.path -replace '\\', '/'
+
+            if ($SkipScript -and $RelPath -ieq $ScriptFileName) {
+                continue
+            }
+
+            $LocalPath = Join-Path $ScriptDir ($RelPath -replace '/', '\')
+            $RemoteUrl = "$UpdateBaseUrl/$RelPath"
+            $ExpectedHash = $Entry.sha256.ToUpper()
+
+            $NeedsUpdate = $true
+            if (Test-Path $LocalPath) {
+                $LocalHash = (Get-FileHash -Path $LocalPath -Algorithm SHA256).Hash.ToUpper()
+                if ($LocalHash -eq $ExpectedHash) {
+                    $NeedsUpdate = $false
+                }
+            }
+
+            if (-not $NeedsUpdate) { continue }
+
+            Write-Log "Updating: $RelPath"
+            $LocalDir = Split-Path -Parent $LocalPath
+            if (-not (Test-Path $LocalDir)) {
+                New-Item -ItemType Directory -Path $LocalDir -Force | Out-Null
+            }
+
+            $TempFile = "$LocalPath.new"
+            try {
+                Invoke-WebRequest -Uri $RemoteUrl -OutFile $TempFile -UseBasicParsing -TimeoutSec 120
+            }
+            catch {
+                Write-Log "Download failed for ${RelPath}: $_" "WARN"
+                Remove-Item -Path $TempFile -Force -ErrorAction SilentlyContinue
+                continue
+            }
+
+            $DownloadedHash = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToUpper()
+            if ($DownloadedHash -ne $ExpectedHash) {
+                Write-Log "Hash mismatch for $RelPath (expected $ExpectedHash, got $DownloadedHash) - rejecting" "ERROR"
+                Remove-Item -Path $TempFile -Force -ErrorAction SilentlyContinue
+                continue
+            }
+
+            try {
+                Move-Item -Path $TempFile -Destination $LocalPath -Force
+                $UpdatedCount++
+                if ($RelPath -ieq $ScriptFileName) {
+                    $ScriptUpdated = $true
+                }
+            }
+            catch {
+                Write-Log "Failed to replace ${LocalPath} (file in use?): $_" "WARN"
+                Remove-Item -Path $TempFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        if ($UpdatedCount -eq 0) {
+            Write-Log "All files match manifest - nothing to update"
+        }
+        else {
+            Write-Log "Updated $UpdatedCount file(s) from manifest" "SUCCESS"
+        }
+
+        if ($ScriptUpdated) {
+            Write-Log "Script itself was updated - relaunching with new version..." "SUCCESS"
             $RelaunchArgs = "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$ScriptPath`" -SkipSelfUpdate"
             if ($AutoRestart) { $RelaunchArgs += " -AutoRestart" }
             if ($Force) { $RelaunchArgs += " -Force" }
-
+            if ($ManifestOnly) { $RelaunchArgs += " -ManifestOnly" }
+            # Forward UpdateBaseUrl so a test/mirror override survives the relaunch
+            $RelaunchArgs += " -UpdateBaseUrl `"$UpdateBaseUrl`""
             Start-Process "powershell.exe" -ArgumentList $RelaunchArgs
             return $true
         }
 
-        Write-Log "Script is up to date"
         return $false
     }
     catch {
-        Write-Log "Self-update check failed: $_ (continuing with current version)" "WARN"
+        Write-Log "Manifest update check failed: $_ (continuing with current files)" "WARN"
         return $false
     }
     finally {
-        Remove-Item -Path $TempScript -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $TempManifest -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -510,13 +602,25 @@ function Add-OffsetsToIni {
 function Main {
     Write-Log "========== Starting Update-RDPWrap v$ScriptVersion =========="
 
-    # Self-update check (skip if we just updated to prevent loop)
-    if (-not $SkipSelfUpdate) {
-        $WasUpdated = Update-Self
+    # Self-update check
+    # - First run: refresh everything via manifest; if the script itself changed, relaunch
+    # - After relaunch (-SkipSelfUpdate): don't touch the script (anti-loop) but still pull
+    #   any non-script files we missed. Needed when upgrading from the legacy 2.5.x updater,
+    #   which only ever replaced the .ps1 and never the OffsetFinder binaries.
+    if ($SkipSelfUpdate) {
+        Update-FromManifest -SkipScript | Out-Null
+    }
+    else {
+        $WasUpdated = Update-FromManifest
         if ($WasUpdated) {
             Write-Log "Exiting - new version has been launched"
             return 0
         }
+    }
+
+    if ($ManifestOnly) {
+        Write-Log "ManifestOnly mode - exiting after manifest update check"
+        return 0
     }
 
     # Check prerequisites

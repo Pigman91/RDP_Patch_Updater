@@ -1,0 +1,46 @@
+{
+  "version": "2.6.0",
+  "generated": "2026-05-28T07:37:05Z",
+  "files": [
+    {
+      "path": "Update-RDPWrap.ps1",
+      "sha256": "2322F182C432712B3AED5C7D221263554A4A03C95A9BDD9088B108B2B870D620",
+      "size": 30213
+    },
+    {
+      "path": "Install-ScheduledTask.ps1",
+      "sha256": "0C638C0082BD222F37077BB6441F73C3EEB03725115F4C679049149C38FBB140",
+      "size": 3968
+    },
+    {
+      "path": "OffsetFinder/RDPWrapOffsetFinder.exe",
+      "sha256": "41532B6855C9A886DE2EADC5E0BD79C5A87E84CB4CF005B95E314FC915A3CA74",
+      "size": 12288
+    },
+    {
+      "path": "OffsetFinder/RDPWrapOffsetFinder_nosymbol.exe",
+      "sha256": "1064964D6DADBD7F035A189D4CF3D643BAFED13A822E3DEEB6B659F7DC06ECB5",
+      "size": 17920
+    },
+    {
+      "path": "OffsetFinder/dbghelp.dll",
+      "sha256": "194F116F4D2CDCA4C17881E7FE99C78DA38075A3974FEC6A1E044F99E102F62C",
+      "size": 1506920
+    },
+    {
+      "path": "OffsetFinder/symsrv.dll",
+      "sha256": "A79FA77930173E5E1DEB5CDF02460D50363DA34B78A73B72664B260537324445",
+      "size": 137328
+    },
+    {
+      "path": "OffsetFinder/Zydis.dll",
+      "sha256": "AFBDBAF38B8F2789731AB83700B1F4F0095056C3F073288CFE773A103DDBDF81",
+      "size": 635904
+    },
+    {
+      "path": "OffsetFinder/symsrv.yes",
+      "sha256": "36A9E7F1C95B82FFB99743E0C5C4CE95D83C9A430AAC59F84EF3CBFAB6145068",
+      "size": 1
+    }
+  ]
+}
