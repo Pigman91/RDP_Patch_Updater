@@ -30,7 +30,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.7.1"
+$ScriptVersion = "2.7.2"
 
 # Patch byte sequences referenced by *Code.x64 keys in per-version INI sections
 # that may be missing from [PatchCodes] in older rdpwrap.ini files. When a new
@@ -594,7 +594,8 @@ function Get-VersionFromOutput {
 function Test-VersionExists {
     param([string]$Version, [string]$IniContent)
 
-    $Pattern = "\[$([regex]::Escape($Version))\]"
+    # Anchored to line start: a header prefixed with garbage is not a valid INI section
+    $Pattern = "(?m)^\[$([regex]::Escape($Version))\]\s*$"
     return $IniContent -match $Pattern
 }
 
@@ -670,17 +671,36 @@ function Repair-WrongPatchCodes {
     return $Result
 }
 
-# Run both Repair-WrongPatchCodes and Add-MissingPatchCodes against rdpwrap.ini.
-# Restart TermService if either modified the file. No-op if INI is already good.
+# Up to 2.7.0, a retry-path success leaked Ensure-PdbCached's $true/$false into the
+# offsets string, so the INI got e.g. "False False False False True [10.0.26100.9818]".
+# rdpwrap.dll ignores such a section and multi-session silently stops working.
+# Strip the garbage so the header starts the line again. Returns @{ Content; Fixed }.
+function Repair-CorruptSectionHeaders {
+    param([string]$IniContent)
+    $Result = @{ Content = $IniContent; Fixed = @() }
+    $Pattern = '(?m)^(?:(?:True|False)[ \t]+)+(\[\d+\.\d+\.\d+\.\d+(?:-SLInit)?\])'
+    foreach ($M in [regex]::Matches($IniContent, $Pattern)) {
+        $Result.Fixed += $M.Groups[1].Value
+    }
+    if ($Result.Fixed.Count -gt 0) {
+        $Result.Content = $IniContent -replace $Pattern, '$1'
+    }
+    return $Result
+}
+
+# Run Repair-CorruptSectionHeaders, Repair-WrongPatchCodes and Add-MissingPatchCodes
+# against rdpwrap.ini. Restart TermService if any modified the file. No-op if INI is already good.
 function Update-PatchCodesInIni {
     $CurrentContent = Get-Content -Path $RdpWrapIniPath -Raw -Encoding UTF8
 
-    $Repair = Repair-WrongPatchCodes -IniContent $CurrentContent
+    $Headers = Repair-CorruptSectionHeaders -IniContent $CurrentContent
+    $Repair = Repair-WrongPatchCodes -IniContent $Headers.Content
     $Add    = Add-MissingPatchCodes -IniContent $Repair.Content
 
-    $Changed = ($Repair.Fixed.Count + $Add.Injected.Count) -gt 0
+    $Changed = ($Headers.Fixed.Count + $Repair.Fixed.Count + $Add.Injected.Count) -gt 0
     if (-not $Changed) { return $false }
 
+    if ($Headers.Fixed.Count -gt 0)  { Write-Log ("Repaired corrupted section header(s): " + ($Headers.Fixed -join ', ')) "WARN" }
     if ($Repair.Fixed.Count -gt 0)   { Write-Log ("Fixed wrong PatchCode hex: " + ($Repair.Fixed -join ', ')) "WARN" }
     if ($Add.Injected.Count -gt 0)   { Write-Log ("Injected missing PatchCode(s): " + ($Add.Injected -join ', ')) }
 
@@ -895,6 +915,9 @@ function Main {
             return 1
         }
     }
+
+    # Defensive: keep only the OffsetFinder text even if stray pipeline output ever leaks in
+    $NewOffsets = @($NewOffsets) | Where-Object { $_ -is [string] } | Select-Object -Last 1
 
     # Extract version
     $Version = Get-VersionFromOutput -Output $NewOffsets
