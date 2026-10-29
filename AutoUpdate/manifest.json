@@ -1,11 +1,11 @@
 {
-  "version": "2.7.0",
-  "generated": "2026-05-28T08:36:46Z",
+  "version": "2.7.1",
+  "generated": "2026-10-29T07:22:48Z",
   "files": [
     {
       "path": "Update-RDPWrap.ps1",
-      "sha256": "8356AB2647F7E7457312B1D5782340A47CC9F168937B5C3C3AA544C5F1E662B4",
-      "size": 36077
+      "sha256": "25A6C89C9E1BA10EF42D49DBFEE600ABCCB08E868ABC0B74FB9CD4D57A34C4F6",
+      "size": 36858
     },
     {
       "path": "Install-ScheduledTask.ps1",

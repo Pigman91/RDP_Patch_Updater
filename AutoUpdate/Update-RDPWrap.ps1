@@ -30,7 +30,7 @@ param(
 )
 
 # Script version
-$ScriptVersion = "2.7.0"
+$ScriptVersion = "2.7.1"
 
 # Patch byte sequences referenced by *Code.x64 keys in per-version INI sections
 # that may be missing from [PatchCodes] in older rdpwrap.ini files. When a new
@@ -490,8 +490,11 @@ function Invoke-OffsetFinder {
             $script:LastOffsetFinderOutput = $OutputText
         }
 
-        # If there's an error in output, try nosymbol version
-        if ($OutputText -match "ERROR:" -or $ErrorText -match "ERROR:" -or [string]::IsNullOrWhiteSpace($OutputText)) {
+        # If the symbol version failed in any way, try nosymbol version.
+        # Non-zero exit must trigger the fallback too: when Microsoft has not yet published
+        # the PDB for a fresh termsrv.dll, OffsetFinder prints only "Symbol not found"
+        # (no "ERROR:") and exits with -7.
+        if ($ExitCode -ne 0 -or $OutputText -match "ERROR:" -or $ErrorText -match "ERROR:" -or [string]::IsNullOrWhiteSpace($OutputText)) {
             Write-Log "Symbol version failed (exit=$ExitCode)" "WARN"
             if (-not [string]::IsNullOrWhiteSpace($OutputText)) { Write-Log "Symbol stdout: $($OutputText.Trim())" "WARN" }
             if (-not [string]::IsNullOrWhiteSpace($ErrorText)) { Write-Log "Symbol stderr: $($ErrorText.Trim())" "WARN" }
@@ -510,6 +513,16 @@ function Invoke-OffsetFinder {
                 $Process.WaitForExit()
 
                 $ExitCode = $Process.ExitCode
+
+                if (-not [string]::IsNullOrWhiteSpace($OutputText)) {
+                    $script:LastOffsetFinderOutput = $OutputText
+                }
+                if ($ExitCode -eq 0 -and $OutputText -notmatch "ERROR:") {
+                    Write-Log "Nosymbol version succeeded"
+                }
+            }
+            else {
+                Write-Log "Nosymbol version not found: $NoSymbolPath" "WARN"
             }
         }
 
@@ -553,7 +566,8 @@ function Get-NewOffsetsRetry {
         Write-Log "Attempt $AttemptNum of $($TotalAttempts + 1) - waiting ${DelayMin} minutes before retry..." "WARN"
         Start-Sleep -Seconds $Delay
 
-        Ensure-PdbCached
+        # Out-Null: a bare call would leak $true/$false into this function's return value
+        Ensure-PdbCached | Out-Null
         $Result = Invoke-OffsetFinder
         if ($Result) {
             Write-Log "Succeeded on attempt $AttemptNum of $($TotalAttempts + 1)"
@@ -817,7 +831,7 @@ function Main {
     # (symsrv.dll inside OffsetFinder uses WinINet which fails in non-interactive Task Scheduler sessions)
     $OffsetFinderDir = Split-Path -Parent $OffsetFinderPath
     $SymDir = Join-Path $OffsetFinderDir "sym"
-    Ensure-PdbCached
+    Ensure-PdbCached | Out-Null
 
     # Try OffsetFinder
     Write-Log "Running RDPWrapOffsetFinder.exe..."
